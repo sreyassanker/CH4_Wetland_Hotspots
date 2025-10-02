@@ -1,0 +1,51 @@
+// =============================
+// VIIRS Nighttime Lights (Monthly)
+// =============================
+
+// SETTINGS: change only these
+var YEAR = 2024;      // <-- Change year here
+var MONTH = 4;        // <-- Change month here (1=Jan, 2=Feb, ..., 12=Dec)
+
+
+// Auto-generate start and end dates
+var start = ee.Date.fromYMD(YEAR, MONTH, 1);
+var end   = start.advance(1, 'month');
+
+// Load dataset
+var dataset = ee.ImageCollection('NOAA/VIIRS/DNB/MONTHLY_V1/VCMCFG')
+                .filterDate(start, end)
+                .filterBounds(roi);
+
+// Select avg_rad (nighttime radiance)
+var nighttime = dataset.select('avg_rad').mean();
+
+// Visualization parameters
+var nighttimeVis = {
+  min: 0.0,
+  max: 60.0,
+  palette: ['black', 'blue', 'purple', 'cyan', 'green', 'yellow', 'red']
+};
+
+// Add to map
+Map.centerObject(roi, 5);
+Map.addLayer(nighttime.clip(roi), nighttimeVis, 'Nighttime Lights');
+
+// Cloud-free coverage band
+var cfCoverage = dataset.select('cf_cvg').mean();
+
+var cfVis = {
+  min: 0,
+  max: 58,
+  palette: ['white', 'lightblue', 'blue', 'darkblue']
+};
+Map.addLayer(cfCoverage.clip(roi), cfVis, 'Cloud-free Coverage');
+
+// Export to Google Drive (optional)
+Export.image.toDrive({
+  image: nighttime.clip(roi),
+  description: 'VIIRS_NTL_' + YEAR + '_' + MONTH,
+  scale: 463.83,    // native resolution
+  region: roi,
+  crs: 'EPSG:4326',
+  maxPixels: 1e13
+});
