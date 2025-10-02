@@ -1,0 +1,60 @@
+Map.centerObject(roi, 5);
+
+// =========================
+// 2) SETTINGS
+// =========================
+var YEAR  = 2024;
+var MONTH = 1;                  // January only
+var useEra5Land = false;        // true -> ERA5-Land, false -> global ERA5
+var outFolder   = 'ERA5_2024';
+
+// ERA5 variable(s) to export
+var bands = ['temperature_2m']; // add more variables if needed
+
+// =========================
+// 3) LOAD ERA5 COLLECTION
+// =========================
+var collectionId = useEra5Land
+  ? 'ECMWF/ERA5_LAND/HOURLY'
+  : 'ECMWF/ERA5/HOURLY';
+
+var start = ee.Date.fromYMD(YEAR, MONTH, 1);
+var end   = start.advance(1, 'month');
+
+var era = ee.ImageCollection(collectionId)
+  .select(bands)
+  .filterDate(start, end)
+  .filterBounds(roi);
+
+print('Dataset:', collectionId);
+print('Images in 2024:', era.size());
+
+// =========================
+// 4) MONTHLY MEAN
+// =========================
+var monthlyMean = era.mean()
+  .rename(bands.map(function(b){ return b + '_mean'; }))
+  .clip(roi)
+  .toFloat();
+
+// =========================
+// 5) MAP PREVIEW
+// =========================
+var vizTemp = {min: 250, max: 320}; // Kelvin
+Map.addLayer(monthlyMean, vizTemp, 'ERA5 2m Temp Jan 2024');
+Map.addLayer(roi, {color: 'white'}, 'Bounding Box ROI', false);
+
+// =========================
+// 6) EXPORT TO GOOGLE DRIVE (WITH SPECIFIC SCALE)
+// =========================
+Export.image.toDrive({
+  image: monthlyMean,
+  description: 'ERA5_2024_01_BoxROI_temperature2m_mean',
+  fileNamePrefix: 'ERA5_2024_01_BoxROI_temperature2m_mean',
+  folder: outFolder,
+  region: roi,
+  scale: 11132,  // scale in meters
+  maxPixels: 1e13,
+  fileFormat: 'GeoTIFF',
+  formatOptions: {cloudOptimized: true}
+});
