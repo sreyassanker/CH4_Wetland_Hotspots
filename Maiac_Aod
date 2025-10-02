@@ -1,0 +1,51 @@
+// =========================
+// SETTINGS
+// =========================
+var YEAR  = 2024;           // Change year here
+var MONTH = 1;              // Change month here (1=Jan, 2=Feb, ..., 12=Dec)
+var outFolder = 'MAIAC_AOD_' + YEAR; // Google Drive folder
+
+var datasetId = "MODIS/061/MCD19A2_GRANULES";
+var bandName  = "Optical_Depth_047"; // Blue-band AOD (scaled)
+
+// Center map for preview
+Map.centerObject(roi, 6);
+
+// Compute start and end dates dynamically
+var start = ee.Date.fromYMD(YEAR, MONTH, 1);
+var end   = start.advance(1, 'month');  // exclusive upper bound
+
+// Load and filter the collection
+var col = ee.ImageCollection(datasetId)
+             .select(bandName)
+             .filterDate(start, end)
+             .filterBounds(roi);
+
+print('Image count for ' + YEAR + '-' + MONTH + ':', col.size());
+
+// Compute monthly mean, apply scale factor (0.001 per dataset docs)
+var monthMean = col.mean()
+                   .multiply(0.001)
+                   .rename('AOD_047')
+                   .clip(roi)
+                   .unmask(-9999) // fill missing with -9999
+                   .toFloat();
+
+// Preview on the map
+Map.addLayer(monthMean,
+             {min: 0, max: 1,
+              palette: ['white','blue','green','yellow','orange','red']},
+             'AOD ' + YEAR + '-' + MONTH);
+
+// Export to Google Drive as GeoTIFF
+Export.image.toDrive({
+  image: monthMean,
+  description: 'MAIAC_AOD_' + YEAR + '_' + (MONTH < 10 ? '0' + MONTH : MONTH),
+  fileNamePrefix: 'MAIAC_AOD_' + YEAR + '_' + (MONTH < 10 ? '0' + MONTH : MONTH),
+  folder: outFolder,
+  region: roi,
+  scale: 1000,          // native MAIAC ~1 km
+  maxPixels: 1e13,
+  fileFormat: 'GeoTIFF',
+  formatOptions: {cloudOptimized: true}
+});
