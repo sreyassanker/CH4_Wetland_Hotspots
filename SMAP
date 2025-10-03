@@ -1,0 +1,181 @@
+// =============================
+// SETTINGS
+// =============================
+var YEAR = 2024;      // <-- Change year
+var MONTH = 7;        // <-- Change month (1=Jan, 2=Feb, ..., 12=Dec)
+
+var start = ee.Date.fromYMD(YEAR, MONTH, 1);
+var end   = start.advance(1, 'month');
+
+// =============================
+// LOAD DATASET (SMAP L4 Global 9 km)
+// =============================
+var dataset = ee.ImageCollection("NASA/SMAP/SPL4SMGP/008")
+                .filterDate(start, end)
+                .filterBounds(roi);
+
+print("SMAP L4 dataset", dataset.limit(5));
+
+// =============================
+// SELECT BANDS & COMPOSITE
+// =============================
+
+// Soil Moisture (fractions)
+var sm_surface  = dataset.select("sm_surface").mean();
+var sm_rootzone = dataset.select("sm_rootzone").mean();
+var sm_profile  = dataset.select("sm_profile").mean();
+
+// Soil wetness & saturation
+var sm_surface_wetness  = dataset.select("sm_surface_wetness").mean();
+var sm_rootzone_wetness = dataset.select("sm_rootzone_wetness").mean();
+var land_fraction_saturated = dataset.select("land_fraction_saturated").mean();
+
+// Vegetation
+var lai = dataset.select("leaf_area_index").mean();
+var vegfrac = dataset.select("vegetation_greenness_fraction").mean();
+
+// Temperature
+var surface_temp = dataset.select("surface_temp").mean();
+var soil_temp_l1 = dataset.select("soil_temp_layer1").mean();
+
+// Atmospheric / boundary layer
+var height_lowatmmodlay     = dataset.select("height_lowatmmodlay").mean();
+var specific_humidity_layer = dataset.select("specific_humidity_lowatmmodlay").mean();
+var windspeed_layer         = dataset.select("windspeed_lowatmmodlay").mean();
+
+// Hydrology / fluxes
+var precipitation_flux   = dataset.select("precipitation_total_surface_flux").mean();
+var infiltration_flux    = dataset.select("soil_water_infiltration_flux").mean();
+
+// =============================
+// VISUALIZATION
+// =============================
+Map.centerObject(roi, 5);
+
+Map.addLayer(sm_surface.clip(roi), {min:0, max:0.9, palette:['red','yellow','green','blue']}, "Surface SM");
+Map.addLayer(sm_rootzone.clip(roi), {min:0, max:0.9, palette:['red','yellow','green','blue']}, "Rootzone SM");
+Map.addLayer(sm_profile.clip(roi), {min:0, max:0.9, palette:['red','yellow','green','blue']}, "Profile SM");
+Map.addLayer(lai.clip(roi), {min:0, max:6, palette:['brown','green']}, "Leaf Area Index");
+Map.addLayer(surface_temp.clip(roi), {min:250, max:320, palette:['blue','yellow','red']}, "Surface Temp");
+
+// =============================
+// EXPORT TO DRIVE
+// =============================
+
+// Export each key variable
+Export.image.toDrive({
+  image: sm_surface.clip(roi),
+  description: 'SMAP_SurfaceSM_' + YEAR + '_' + MONTH,
+  scale: 11000,   // native ~9 km resolution
+  region: roi,
+  crs: 'EPSG:4326',
+  maxPixels: 1e13
+});
+
+Export.image.toDrive({
+  image: sm_rootzone.clip(roi),
+  description: 'SMAP_RootzoneSM_' + YEAR + '_' + MONTH,
+  scale: 11000,
+  region: roi,
+  crs: 'EPSG:4326',
+  maxPixels: 1e13
+});
+
+Export.image.toDrive({
+  image: sm_profile.clip(roi),
+  description: 'SMAP_ProfileSM_' + YEAR + '_' + MONTH,
+  scale: 11000,
+  region: roi,
+  crs: 'EPSG:4326',
+  maxPixels: 1e13
+});
+
+Export.image.toDrive({
+  image: sm_surface_wetness.clip(roi),
+  description: 'SMAP_SurfaceWetness_' + YEAR + '_' + MONTH,
+  scale: 11000,
+  region: roi,
+  crs: 'EPSG:4326',
+  maxPixels: 1e13
+});
+
+Export.image.toDrive({
+  image: land_fraction_saturated.clip(roi),
+  description: 'SMAP_LandFractionSaturated_' + YEAR + '_' + MONTH,
+  scale: 11000,
+  region: roi,
+  crs: 'EPSG:4326',
+  maxPixels: 1e13
+});
+
+Export.image.toDrive({
+  image: lai.clip(roi),
+  description: 'SMAP_LAI_' + YEAR + '_' + MONTH,
+  scale: 11000,
+  region: roi,
+  crs: 'EPSG:4326',
+  maxPixels: 1e13
+});
+
+Export.image.toDrive({
+  image: surface_temp.clip(roi),
+  description: 'SMAP_SurfaceTemp_' + YEAR + '_' + MONTH,
+  scale: 11000,
+  region: roi,
+  crs: 'EPSG:4326',
+  maxPixels: 1e13
+});
+
+Export.image.toDrive({
+  image: soil_temp_l1.clip(roi),
+  description: 'SMAP_SoilTempL1_' + YEAR + '_' + MONTH,
+  scale: 11000,
+  region: roi,
+  crs: 'EPSG:4326',
+  maxPixels: 1e13
+});
+
+Export.image.toDrive({
+  image: height_lowatmmodlay.clip(roi),
+  description: 'SMAP_HeightLowAtmModLay_' + YEAR + '_' + MONTH,
+  scale: 11000,
+  region: roi,
+  crs: 'EPSG:4326',
+  maxPixels: 1e13
+});
+
+Export.image.toDrive({
+  image: specific_humidity_layer.clip(roi),
+  description: 'SMAP_SpecificHumidity_' + YEAR + '_' + MONTH,
+  scale: 11000,
+  region: roi,
+  crs: 'EPSG:4326',
+  maxPixels: 1e13
+});
+
+Export.image.toDrive({
+  image: windspeed_layer.clip(roi),
+  description: 'SMAP_WindSpeed_' + YEAR + '_' + MONTH,
+  scale: 11000,
+  region: roi,
+  crs: 'EPSG:4326',
+  maxPixels: 1e13
+});
+
+Export.image.toDrive({
+  image: precipitation_flux.clip(roi),
+  description: 'SMAP_PrecipitationFlux_' + YEAR + '_' + MONTH,
+  scale: 11000,
+  region: roi,
+  crs: 'EPSG:4326',
+  maxPixels: 1e13
+});
+
+Export.image.toDrive({
+  image: infiltration_flux.clip(roi),
+  description: 'SMAP_InfiltrationFlux_' + YEAR + '_' + MONTH,
+  scale: 11000,
+  region: roi,
+  crs: 'EPSG:4326',
+  maxPixels: 1e13
+});
