@@ -1,0 +1,29 @@
+
+var dataset = ee.Image('NASA/NASADEM_HGT/001');
+var elevation = dataset.select('elevation');
+
+// 3. Visualization parameters
+var elevationVis = {
+  min: -10,
+  max: 9000,
+  palette: ['blue', 'green', 'brown', 'white']
+};
+
+// 4. Clip to ROI and mask <=0 m
+var elevationClipped = elevation.clip(roi).updateMask(elevation.gt(0));
+
+// 5. Add to Map
+Map.centerObject(roi, 8);
+Map.addLayer(elevationClipped, elevationVis, 'Elevation (ROI)');
+
+// 6. Export to Google Drive at 30 m
+Export.image.toDrive({
+  image: elevationClipped,
+  description: 'NASADEM_Elevation_ROI_30m',
+  folder: 'GEE_Exports',   // change to your folder
+  fileNamePrefix: 'NASADEM_Elevation_ROI_30m',
+  region: roi,
+  scale: 500,               // Pixel size = 30 m
+  crs: 'EPSG:4326',        // WGS84
+  maxPixels: 1e13
+});
