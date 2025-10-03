@@ -1,0 +1,52 @@
+// =============================
+// AVHRR NDVI (Monthly)
+// =============================
+
+// SETTINGS
+var YEAR = 2024;     
+var MONTH = 12;       
+
+// Auto-generate start and end dates
+var start = ee.Date.fromYMD(YEAR, MONTH, 1);
+var end   = start.advance(1, 'month');
+
+// Load dataset (AVHRR NDVI CDR V5)
+var dataset = ee.ImageCollection("NOAA/CDR/VIIRS/NDVI/V1")
+                .filterDate(start, end)
+                .filterBounds(roi);
+
+print('Number of images:', dataset.size());
+print('Sample images:', dataset.limit(5));
+
+// Compute NDVI only if collection is not empty
+var ndvi = ee.Algorithms.If(
+  dataset.size().gt(0),
+  dataset.select('NDVI').mean().multiply(0.0001),
+  ee.Image(0).rename('NDVI')  // fallback dummy
+);
+
+ndvi = ee.Image(ndvi);
+
+// Visualization parameters
+var ndviVis = {
+  min: -0.1,
+  max: 1.0,
+  palette: [
+    'ffffff', 'ce7e45', 'fcd163', 'c6ca02',
+    '22cc04', '99b718', '207401', '012e01'
+  ]
+};
+
+// Add to map
+Map.centerObject(roi, 5);
+Map.addLayer(ndvi.clip(roi), ndviVis, 'NDVI');
+
+// Export to Google Drive
+Export.image.toDrive({
+  image: ndvi.clip(roi),
+  description: 'AVHRR_NDVI_' + YEAR + '_' + MONTH,
+  scale: 5566,
+  region: roi,
+  crs: 'EPSG:4326',
+  maxPixels: 1e13
+});
