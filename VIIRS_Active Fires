@@ -1,0 +1,47 @@
+var YEAR = 2024;     
+var MONTH = 12;       
+
+// Auto-generate start and end dates
+var start = ee.Date.fromYMD(YEAR, MONTH, 8);   // start from 8th day
+var end   = start.advance(22, 'day');          // 22 days after (8 → 30 normally, auto adjusts to Feb 29)
+
+// Load dataset (Suomi NPP VIIRS, Active Fires, Collection 2)
+var dataset = ee.ImageCollection('NASA/LANCE/SNPP_VIIRS/C2')
+                .filterDate(start, end)
+                .filterBounds(roi);
+
+print('Start date:', start);
+print('End date:', end);
+print('Number of images:', dataset.size());
+print('Sample images:', dataset.limit(5));
+
+// Compute Bright_ti4 mean only if collection is not empty
+var bright_ti4 = ee.Algorithms.If(
+  dataset.size().gt(0),
+  dataset.select('Bright_ti4').mean(),
+  ee.Image(0).rename('Bright_ti4')  // fallback dummy
+);
+
+bright_ti4 = ee.Image(bright_ti4);
+
+// Visualization parameters
+var fireVis = {
+  min: 280.0,
+  max: 400.0,
+  palette: ['yellow', 'orange', 'red', 'white', 'darkred'],
+  bands: ['Bright_ti4']
+};
+
+// Add to map
+Map.centerObject(roi, 6);
+Map.addLayer(bright_ti4.clip(roi), fireVis, 'Suomi VIIRS Bright_ti4');
+
+// Export to Google Drive
+Export.image.toDrive({
+  image: bright_ti4.clip(roi),
+  description: 'Suomi_VIIRS_Bright_ti4_' + YEAR + '_' + MONTH,
+  scale: 375,                // pixel size in meters
+  region: roi,
+  crs: 'EPSG:4326',
+  maxPixels: 1e13
+});
