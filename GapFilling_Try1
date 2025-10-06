@@ -1,0 +1,284 @@
+# --- STEP 1: Mount Drive and set paths ---
+from google.colab import drive
+drive.mount('/content/drive')
+
+import os
+import zipfile
+from glob import glob
+
+////////////////////////////////////////
+
+# ✅ Change this to your own ZIP path in Drive
+zip_path = '/content/drive/MyDrive/CH4_Fusion_Downscaling.zip'
+extract_path = '/content/CH4_project_data'
+
+if not os.path.exists(extract_path):
+    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+        zip_ref.extractall(extract_path)
+print("✅ Data extracted to:", extract_path)
+
+
+/////////////////////////////////
+
+# --- STEP 2: Import libraries ---
+!pip install rasterio geopandas numpy tqdm --quiet
+import rasterio
+from rasterio.enums import Resampling
+from rasterio.warp import calculate_default_transform, reproject
+import numpy as np
+from tqdm import tqdm
+
+////////////////////////////////
+
+# --- STEP 3: Identify reference CH₄ raster (manual path) ---
+
+# 🔹 Provide your CH₄ raster folder path manually (the folder that contains your CH₄ .tif files)
+ch4_folder = '/content/CH4_project_data/CH4_Monthly_Mean(ppb)'  # 👈 change this to your actual folder path
+# Example: '/content/CH4_project_data/2020_2025_CH4' or your Drive extracted folder
+
+# 🔹 If multiple CH₄ rasters are present, pick the one you want as reference (same grid/resolution)
+from glob import glob
+import os
+
+ref_files = glob(os.path.join(ch4_folder, '*.tif'))
+if len(ref_files) == 0:
+    raise FileNotFoundError(f"❌ No CH₄ rasters found in: {ch4_folder}\nPlease check the folder path.")
+
+# You can either automatically select the first file
+ref_raster = ref_files[0]
+
+# Or manually select one if you have multiple monthly rasters
+# ref_raster = [f for f in ref_files if '2021' in f][0]   # example for a specific year
+
+print("✅ Reference CH₄ grid selected:")
+print(ref_raster)
+
+
+/////////////////////////////////////
+
+# --- STEP 4: Define resampling function ---
+def resample_raster(src_path, ref_path, dst_path, resampling_method=Resampling.bilinear):
+    """Resamples src_path raster to match the grid, CRS, and resolution of ref_path."""
+    with rasterio.open(ref_path) as ref:
+        ref_meta = ref.meta.copy()
+        dst_transform = ref.transform
+        dst_crs = ref.crs
+        dst_width = ref.width
+        dst_height = ref.height
+
+    with rasterio.open(src_path) as src:
+        src_data = src.read(1)
+        src_meta = src.meta.copy()
+        dst_data = np.empty((dst_height, dst_width), dtype=rasterio.float32)
+
+        reproject(
+            source=src_data,
+            destination=dst_data,
+            src_transform=src.transform,
+            src_crs=src.crs,
+            dst_transform=dst_transform,
+            dst_crs=dst_crs,
+            resampling=resampling_method
+        )
+
+        ref_meta.update({
+            "driver": "GTiff",
+            "height": dst_height,
+            "width": dst_width,
+            "transform": dst_transform,
+            "crs": dst_crs,
+            "dtype": rasterio.float32
+        })
+
+        os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+        with rasterio.open(dst_path, "w", **ref_meta) as dst:
+            dst.write(dst_data, 1)
+
+
+////////////////////////////////////
+
+# --- STEP 5: Process all TIFFs ---
+input_tifs = glob(os.path.join(extract_path, '**', '*.tif'), recursive=True)
+output_dir = '/content/CH4_resampled_1km'
+os.makedirs(output_dir, exist_ok=True)
+
+print(f"🔁 Found {len(input_tifs)} TIFF files to process...")
+
+for tif in tqdm(input_tifs):
+    # Skip the CH₄ reference itself
+    if tif == ref_raster:
+        continue
+    base_name = os.path.basename(tif)
+    out_path = os.path.join(output_dir, base_name)
+    resample_raster(tif, ref_raster, out_path)
+
+print("✅ All rasters resampled and saved to:", output_dir)
+
+
+//////////////////////////////
+
+# --- STEP 6: Verify one output ---
+import matplotlib.pyplot as plt
+
+sample_out = glob(os.path.join(output_dir, '*.tif'))[0]
+with rasterio.open(sample_out) as src:
+    plt.imshow(src.read(1), cmap='viridis')
+    plt.title(f"Sample: {os.path.basename(sample_out)}")
+    plt.colorbar(label='Value')
+    plt.show()
+
+print("✅ Verification complete. Ready for ML gap-filling step.")
+
+///////////////////////
+
+
+!pip install xgboost rasterio numpy scikit-learn tqdm --quiet
+import rasterio
+import numpy as np
+from glob import glob
+import os
+from tqdm import tqdm
+from xgboost import XGBRegressor
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import r2_score
+
+
+//////////////////////////////////
+
+# --- PATHS ---
+predictor_dir = '/content/CH4_resampled_1km'     # Folder with all resampled predictor TIFFs
+ch4_dir        = '/content/CH4_project_data/CH4_Monthly_Mean(ppb)'  # Folder with monthly CH₄ rasters (gappy)
+output_dir     = '/content/CH4_gapfilled_output'
+os.makedirs(output_dir, exist_ok=True)
+
+////////////////////////////////
+
+# --- STEP 1: Load all predictor rasters ---
+predictor_files = sorted(glob(os.path.join(predictor_dir, '*.tif')))
+print(f"✅ Loaded {len(predictor_files)} predictor layers")
+
+# Load them as stacked array (height, width, n_features)
+with rasterio.open(predictor_files[0]) as ref:
+    meta = ref.meta.copy()
+    height, width = ref.height, ref.width
+
+predictor_stack = np.zeros((len(predictor_files), height, width), dtype=np.float32)
+for i, p in enumerate(predictor_files):
+    with rasterio.open(p) as src:
+        predictor_stack[i, :, :] = src.read(1)
+
+
+///////////////////////////////
+
+# Flatten predictors for ML (pixels × features)
+n_features = predictor_stack.shape[0]
+predictors_2d = predictor_stack.reshape(n_features, -1).T  # shape: (pixels, features)
+print("Predictor stack shape:", predictors_2d.shape)
+
+
+//////////////////////////////////
+
+# --- STEP 2: Loop through each monthly CH₄ raster ---
+ch4_files = sorted(glob(os.path.join(ch4_dir, '*.tif')))
+print(f"✅ Found {len(ch4_files)} monthly CH₄ rasters")
+
+for ch4_path in tqdm(ch4_files):
+    month_name = os.path.splitext(os.path.basename(ch4_path))[0]
+
+    # Read CH₄ data
+    with rasterio.open(ch4_path) as src:
+        ch4_data = src.read(1).astype(np.float32)
+        ch4_meta = src.meta.copy()
+
+    # Mask invalid or missing values (NaN, 0, or negative)
+    mask = np.isnan(ch4_data) | (ch4_data <= 0)
+    y = ch4_data.flatten()
+
+    # Split into known and unknown pixels
+    X_known = predictors_2d[~mask.flatten()]
+    y_known = y[~mask.flatten()]
+    X_missing = predictors_2d[mask.flatten()]
+
+    print(f"\n🧩 {month_name}: {len(y_known)} valid pixels, {len(X_missing)} missing pixels")
+
+
+////////////////////////////
+
+# --- STEP 3: Train XGBoost model (works for ALL versions, including ≥2.2) ---
+from sklearn.metrics import r2_score, mean_squared_error
+import xgboost as xgb
+
+# Split data
+X_train, X_val, y_train, y_val = train_test_split(
+    X_known, y_known, test_size=0.2, random_state=42
+)
+
+# Convert to DMatrix (required for the low-level training API)
+dtrain = xgb.DMatrix(X_train, label=y_train)
+dval   = xgb.DMatrix(X_val, label=y_val)
+
+# Set model parameters
+params = {
+    "objective": "reg:squarederror",
+    "eta": 0.05,
+    "max_depth": 6,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "eval_metric": "rmse",
+    "tree_method": "hist",        # CPU (change to "gpu_hist" if GPU available)
+    "seed": 42
+}
+
+# Train with early stopping (always supported here)
+evals = [(dtrain, "train"), (dval, "val")]
+model = xgb.train(
+    params=params,
+    dtrain=dtrain,
+    num_boost_round=400,
+    evals=evals,
+    early_stopping_rounds=30,
+    verbose_eval=False
+)
+
+# Predict and evaluate
+y_pred_val = model.predict(dval)
+r2 = r2_score(y_val, y_pred_val)
+rmse = np.sqrt(mean_squared_error(y_val, y_pred_val))
+print(f"✅ {month_name}: Model trained (R² = {r2:.3f}, RMSE = {rmse:.3f})")
+
+# Predict missing pixels
+dmissing = xgb.DMatrix(X_missing)
+y_pred_missing = model.predict(dmissing)
+
+
+////////////////////////////
+
+# --- STEP 4: Predict missing values (DMatrix compatible) ---
+dmissing = xgb.DMatrix(X_missing)
+y_pred_missing = model.predict(dmissing)
+
+# Fill the gaps
+y_filled = y.copy()
+y_filled[mask.flatten()] = y_pred_missing
+
+# Reshape back to raster dimensions
+ch4_filled = y_filled.reshape(height, width)
+
+# --- STEP 5: Save output raster ---
+out_path = os.path.join(output_dir, f"{month_name}_gapfilled.tif")
+
+# Ensure metadata consistency
+ch4_meta.update({
+    "dtype": "float32",
+    "compress": "lzw"   # optional, to reduce file size
+})
+
+# Save final gap-filled raster
+with rasterio.open(out_path, 'w', **ch4_meta) as dst:
+    dst.write(ch4_filled.astype(np.float32), 1)
+
+print(f"💾 Saved gap-filled raster: {out_path}")
+
+
+////////////////////////////////////
+
