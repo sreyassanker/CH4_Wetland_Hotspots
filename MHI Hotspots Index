@@ -1,0 +1,329 @@
+# ==============================================================
+# 0. Install dependencies
+# ==============================================================
+!pip install rasterio geopandas matplotlib numpy
+
+# ==============================================================
+# 1. Imports
+# ==============================================================
+import rasterio
+import rasterio.warp
+from rasterio.enums import Resampling
+from rasterio.plot import show
+import geopandas as gpd
+import numpy as np
+import matplotlib.pyplot as plt
+import glob, os
+
+//////////////////////////////////////
+
+# ============================
+ch4_file     = "/content/CH4_GapFilled_data/Extracted Gap Filled/Dec.tif"
+sm_dir       = "/content/CH4_Output_data/SMAP_SurfaceSM/Dec.tif"   # can match one multi-band file or many single-band files
+wetland_dir  = "/content/GLWD_data/GLWD_33/*.tif"  # can be one GLWD file or many class files
+target_shp   = "/content/drive/MyDrive/SA_Shapefile/Study_Area.shp"     # shapefile (ensure .shp)
+out_dir      = "/content/outputs"  # where outputs will be saved
+os.makedirs(out_dir, exist_ok=True)
+# ============================
+
+/////////////////////////
+
+# 0. GLWD wetland IDs considered wetland (08-33, per your list)
+wetland_ids = list(range(8, 34))  # 8..33 inclusive
+
+# ----------------------------
+# 1. Read shapefile and get target CRS
+# ----------------------------
+gdf = gpd.read_file(target_shp)
+target_crs = gdf.crs
+if target_crs is None:
+    raise SystemExit("Shapefile has no CRS defined. Please set a CRS.")
+print("Target CRS from shapefile:", target_crs)
+
+# ----------------------------
+# Utility: reproject raster to target grid (transform/shape provided)
+# ----------------------------
+def reproject_to_match(src_path, dst_shape, dst_transform, dst_crs, resampling=Resampling.bilinear, band_index=1, dtype=np.float32):
+    with rasterio.open(src_path) as src:
+        out = np.empty(dst_shape, dtype=dtype)
+        rasterio.warp.reproject(
+            source=rasterio.band(src, band_index),
+            destination=out,
+            src_transform=src.transform,
+            src_crs=src.crs,
+            dst_transform=dst_transform,
+            dst_crs=dst_crs,
+            resampling=resampling
+        )
+        nod = src.nodatavals[0] if src.nodatavals is not None else None
+        return out, nod
+
+# ----------------------------
+
+/////////////////////////////////
+
+# ----------------------------
+sm_files = sorted(glob.glob(sm_dir))
+if not sm_files:
+    raise SystemExit("No soil moisture files found. Check sm_dir glob path.")
+
+# If single file but multi-band, we'll read bands
+sm_profile = None
+sm_stack_list = []
+
+if len(sm_files) == 1:
+    # single file: check band count
+    with rasterio.open(sm_files[0]) as src:
+        nb = src.count
+        # compute transform/width/height in target_crs
+        transform, width, height = rasterio.warp.calculate_default_transform(
+            src.crs, target_crs, src.width, src.height, *src.bounds
+        )
+        sm_profile = src.profile.copy()
+        sm_profile.update({'crs': target_crs, 'transform': transform, 'width': width, 'height': height})
+        print(f"Single SM file with {nb} bands detected — treating each band as a time slice.")
+        for b in range(1, nb + 1):
+            arr = np.empty((sm_profile['height'], sm_profile['width']), dtype=np.float32)
+            rasterio.warp.reproject(
+                source=rasterio.band(src, b),
+                destination=arr,
+                src_transform=src.transform,
+                src_crs=src.crs,
+                dst_transform=sm_profile['transform'],
+                dst_crs=target_crs,
+                resampling=Resampling.bilinear
+            )
+            nod = src.nodatavals[0]
+            if nod is not None:
+                arr[arr == nod] = np.nan
+            sm_stack_list.append(arr)
+else:
+    # multiple files: treat each file as one time slice (single band)
+    first = sm_files[0]
+    with rasterio.open(first) as src:
+        transform, width, height = rasterio.warp.calculate_default_transform(
+            src.crs, target_crs, src.width, src.height, *src.bounds
+        )
+        sm_profile = src.profile.copy()
+        sm_profile.update({'crs': target_crs, 'transform': transform, 'width': width, 'height': height})
+    print(f"{len(sm_files)} SM files found — treating each file as a time slice.")
+    for f in sm_files:
+        arr = np.empty((sm_profile['height'], sm_profile['width']), dtype=np.float32)
+        rasterio.warp.reproject(
+            source=rasterio.band(rasterio.open(f), 1),
+            destination=arr,
+            src_transform=rasterio.open(f).transform,
+            src_crs=rasterio.open(f).crs,
+            dst_transform=sm_profile['transform'],
+            dst_crs=target_crs,
+            resampling=Resampling.bilinear
+        )
+        # safer nodata handling by opening file and reading nodata
+        with rasterio.open(f) as src:
+            nod = src.nodatavals[0]
+            if nod is not None:
+                arr[arr == nod] = np.nan
+        sm_stack_list.append(arr)
+
+sm = np.stack(sm_stack_list, axis=0).astype(np.float32)
+print("SM stack shape (time, h, w):", sm.shape)
+
+# --
+///////////////////////////////
+
+# 3. Reproject CH4 to the SM master grid and replicate across time (if needed)
+# ----------------------------
+with rasterio.open(ch4_file) as src:
+    ch4_reproj = np.empty((sm_profile['height'], sm_profile['width']), dtype=np.float32)
+    rasterio.warp.reproject(
+        source=rasterio.band(src, 1),
+        destination=ch4_reproj,
+        src_transform=src.transform,
+        src_crs=src.crs,
+        dst_transform=sm_profile['transform'],
+        dst_crs=target_crs,
+        resampling=Resampling.bilinear
+    )
+    ch4_nod = src.nodatavals[0]
+    if ch4_nod is not None:
+        ch4_reproj[ch4_reproj == ch4_nod] = np.nan
+
+# replicate CH4 across time slices
+ch4_stack = np.repeat(ch4_reproj[np.newaxis, :, :], sm.shape[0], axis=0)
+print("CH4 stack shape (time, h, w):", ch4_stack.shape)
+
+# 
+
+/////////////////////////////////
+
+# 4. Z-score helper
+# ----------------------------
+def zscore_band(band, eps=1e-8):
+    valid = np.isfinite(band)
+    if not np.any(valid):
+        return np.full(band.shape, np.nan, dtype=np.float32)
+    m, s = np.nanmean(band[valid]), np.nanstd(band[valid])
+    if s < eps:
+        out = np.zeros_like(band, dtype=np.float32)
+        out[~valid] = np.nan
+        return out
+    out = (band - m) / s
+    out[~valid] = np.nan
+    return out
+
+sm_z  = np.array([zscore_band(b) for b in sm])
+ch4_z = np.array([zscore_band(b) for b in ch4_stack])
+
+# ----------------------------
+# 5. Methane Hotspot Index & hotspots
+# ----------------------------
+mhi = 0.5 * sm_z + 0.5 * ch4_z
+hotspots = np.zeros_like(mhi, dtype=np.uint8)
+
+for t in range(mhi.shape[0]):
+    arr = mhi[t]
+    valid = np.isfinite(arr)
+    if np.any(valid):
+        thr = np.nanpercentile(arr[valid], 90)
+        mask = (arr >= thr) & valid
+        hotspots[t][mask] = 1
+
+hotspot_freq = np.sum(hotspots, axis=0).astype(np.int32)
+print("Hotspot frequency min/max:", np.nanmin(hotspot_freq), np.nanmax(hotspot_freq))
+
+# -------------------------
+
+/////////////////////////
+# 6. Build wetland mask
+#    - If wetland_dir yields a single file: assume it is GLWD-coded raster where pixel values are class IDs.
+#    - If wetland_dir yields multiple files: treat each file as a binary mask (nonzero => that class present).
+# ----------------------------
+wet_files = sorted(glob.glob(wetland_dir))
+if not wet_files:
+    raise SystemExit("No wetland files found. Check wetland_dir glob path.")
+
+# create empty mask (0/1) on master grid
+wetmask = np.zeros((sm_profile['height'], sm_profile['width']), dtype=np.uint8)
+
+if len(wet_files) == 1:
+    # single GLWD file; read, reproject, then check for class IDs
+    wf = wet_files[0]
+    with rasterio.open(wf) as src:
+        wet_reproj = np.empty((sm_profile['height'], sm_profile['width']), dtype=np.float32)
+        rasterio.warp.reproject(
+            source=rasterio.band(src, 1),
+            destination=wet_reproj,
+            src_transform=src.transform,
+            src_crs=src.crs,
+            dst_transform=sm_profile['transform'],
+            dst_crs=target_crs,
+            resampling=Resampling.nearest   # preserve class codes
+        )
+        nod = src.nodatavals[0]
+        if nod is not None:
+            wet_reproj[wet_reproj == nod] = 0
+        # If this is a coded raster, create mask where class in wetland_ids
+        # allow values possibly stored as floats: cast to int safely
+        try:
+            wet_int = np.rint(wet_reproj).astype(np.int32)
+            mask = np.isin(wet_int, wetland_ids)
+            wetmask[mask] = 1
+        except Exception:
+            # fallback: any positive value -> wet
+            wetmask[wet_reproj > 0] = 1
+else:
+    # multiple wetland files — assume each is a binary mask or per-class file
+    for wf in wet_files:
+        with rasterio.open(wf) as src:
+            arr = np.empty((sm_profile['height'], sm_profile['width']), dtype=np.float32)
+            rasterio.warp.reproject(
+                source=rasterio.band(src, 1),
+                destination=arr,
+                src_transform=src.transform,
+                src_crs=src.crs,
+                dst_transform=sm_profile['transform'],
+                dst_crs=target_crs,
+                resampling=Resampling.nearest
+            )
+            nod = src.nodatavals[0]
+            if nod is not None:
+                arr[arr == nod] = 0
+            # any non-zero indicates presence -> mark wet
+            wetmask[arr != 0] = 1
+
+print("Wetland mask built. Wet pixels count:", int(np.nansum(wetmask)))
+
+# ----
+
+///////////////////////////
+
+# 7. Extract wetland and non-wetland hotspot frequencies
+# ----------------------------
+wetland_hotspots = np.where(wetmask == 1, hotspot_freq, np.nan)
+nonwetland_hotspots = np.where(wetmask == 0, hotspot_freq, np.nan)
+
+# ----------------------------
+# 8. Saving helper (uint8 with nodata)
+# ----------------------------
+def save_uint_with_nodata(arr, out_path, base_profile, nodata_val=255, dtype='uint8'):
+    prof = base_profile.copy()
+    # ensure we write a single band
+    prof.update(driver='GTiff', dtype=dtype, count=1, compress='lzw', nodata=nodata_val)
+    # Prepare array: fill NaN as nodata, clip to [0,255] if uint8
+    out = np.array(arr, copy=True)
+    # set NaNs to nodata
+    if np.issubdtype(out.dtype, np.floating):
+        out[np.isnan(out)] = nodata_val
+    # clip values into dtype range
+    if dtype == 'uint8':
+        out[out > 254] = 254  # keep 254 as max actual, reserving 255 as nodata
+        out[out < 0] = 0
+    # cast
+    out = out.astype(np.uint8)
+    with rasterio.open(out_path, 'w', **prof) as dst:
+        dst.write(out, 1)
+    print("Saved:", out_path)
+
+# cap hotspot_freq to 254 (255 reserved for nodata)
+hotspot_freq_cap = hotspot_freq.copy()
+hotspot_freq_cap[hotspot_freq_cap > 254] = 254
+
+save_uint_with_nodata(hotspot_freq_cap, os.path.join(out_dir, "MHCNH_hotspot_frequency.tif"), sm_profile, nodata_val=255)
+# for wetland and non-wetland we want to save hotspot frequency only where present; set others to nodata
+# create arrays with NaN where not applicable
+wet_arr = wetland_hotspots.copy()
+nonwet_arr = nonwetland_hotspots.copy()
+
+# cap
+wet_arr[np.isfinite(wet_arr) & (wet_arr > 254)] = 254
+nonwet_arr[np.isfinite(nonwet_arr) & (nonwet_arr > 254)] = 254
+
+save_uint_with_nodata(wet_arr, os.path.join(out_dir, "MHCNH_wetland_hotspotsDec.tif"), sm_profile, nodata_val=255)
+save_uint_with_nodata(nonwet_arr, os.path.join(out_dir, "MHCNH_nonwetland_hotspotsDec.tif"), sm_profile, nodata_val=255)
+
+# --------
+
+/////////////////////////////////
+
+# ----------------------------
+def show_img(arr, title, vmin=None, vmax=None):
+    plt.imshow(arr, interpolation='none', vmin=vmin, vmax=vmax)
+    plt.title(title)
+    plt.colorbar(label="Frequency")
+
+plt.figure(figsize=(15,5))
+plt.subplot(1,3,1)
+show_img(hotspot_freq, "MHI Hotspot Persistence December 2024 ")
+plt.subplot(1,3,2)
+show_img(np.where(np.isfinite(wet_arr), wet_arr, np.nan), "Wetland Hotspots December 2024")
+plt.subplot(1,3,3)
+show_img(np.where(np.isfinite(nonwet_arr), nonwet_arr, np.nan), "Non-wetland Hotspots December 2024 ")
+plt.tight_layout()
+plt.show()
+
+# ----------------------------
+# 10. Optional: save wetmask as tif for reference
+# ----------------------------
+save_uint_with_nodata(wetmask, os.path.join(out_dir, "MHCNH_wetland_mask.tif"), sm_profile, nodata_val=255)
+
+print("All done. Outputs saved to:", out_dir)
