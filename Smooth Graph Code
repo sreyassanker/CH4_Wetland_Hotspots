@@ -1,0 +1,182 @@
+# ===============================================================
+# 🛰️ Methane Emission Change Detection (12-Month, 7 Countries)
+# Publication-Grade Visualization (Smooth & Annotated)
+# ===============================================================
+
+import os
+import numpy as np
+import pandas as pd
+import geopandas as gpd
+import rasterio
+from rasterio.mask import mask
+from tqdm import tqdm
+import seaborn as sns
+import matplotlib.pyplot as plt
+from scipy.interpolate import make_interp_spline
+
+# --- If not done yet, mount drive and import earlier dataframe ---
+from google.colab import drive
+drive.mount('/content/drive')
+
+# Paths (edit yours)
+tif_dir = "/content/CH4_GapFilled_data/Extracted Gap Filled"
+country_shp_dir = "/content/drive/MyDrive/Countries"
+
+# --- Full month names and mapping ---
+month_order_full = ["January", "February", "March", "April", "May", "June",
+                    "July", "August", "September", "October", "November", "December"]
+month_short_map = {
+    "Jan": "January", "Feb": "February", "March": "March", "April": "April",
+    "May": "May", "June": "June", "July": "July", "Aug": "August",
+    "Sep": "September", "Oct": "October", "Nov": "November", "Dec": "December"
+}
+
+# --- Load country shapefiles ---
+country_shapefiles = sorted([os.path.join(country_shp_dir, f) for f in os.listdir(country_shp_dir) if f.endswith('.shp')])
+countries = {}
+for shp in country_shapefiles:
+    cname = os.path.splitext(os.path.basename(shp))[0]
+    gdf = gpd.read_file(shp).to_crs("EPSG:4326")
+    countries[cname] = gdf
+print("Countries loaded:", list(countries.keys()))
+
+# --- Match month names with .tif files ---
+tif_files = [os.path.join(tif_dir, f) for f in os.listdir(tif_dir) if f.endswith('.tif')]
+tif_dict = {}
+for f in tif_files:
+    for short, full in month_short_map.items():
+        if short.lower() in f.lower():
+            tif_dict[full] = f
+tif_files_sorted = [tif_dict[m] for m in month_order_full if m in tif_dict]
+print("CH₄ files found:", [os.path.basename(f) for f in tif_files_sorted])
+
+# --- Function to extract mean CH₄ (ppb) ---
+def extract_mean_ch4(raster_path, country_gdf):
+    with rasterio.open(raster_path) as src:
+        gdf_proj = country_gdf.to_crs(src.crs)
+        geom = [gdf_proj.geometry.union_all()]
+        try:
+            out_img, _ = mask(src, geom, crop=True)
+            arr = out_img.astype('float32')
+            arr[arr == src.nodata] = np.nan
+            mean_val = np.nanmean(arr)
+        except Exception:
+            mean_val = np.nan
+    return mean_val
+
+# --- Extract monthly CH₄ means for each country ---
+data = []
+for tif_path in tqdm(tif_files_sorted, desc="Extracting CH₄ Means"):
+    month_name = os.path.splitext(os.path.basename(tif_path))[0]
+    month_full = month_short_map.get(month_name, month_name)
+    row = {"Month": month_full}
+    for cname, cgdf in countries.items():
+        row[cname] = extract_mean_ch4(tif_path, cgdf)
+    data.append(row)
+
+df = pd.DataFrame(data)
+df["Month"] = pd.Categorical(df["Month"], categories=month_order_full, ordered=True)
+df = df.sort_values("Month").reset_index(drop=True)
+print("\n✅ Monthly CH₄ dataframe:\n", df.head(12))
+
+# --- Save CSV ---
+output_csv = "/content/drive/MyDrive/CH4_Monthly_Mean_By_Country_ppb.csv"
+df.to_csv(output_csv, index=False)
+print(f"\n📁 Saved results to: {output_csv}")
+
+////////////////////
+
+# ===============================================================
+# 🌍 Publication-Grade Multi-Line Graph (CH₄ Emission - 7 Countries)
+# ===============================================================
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+import numpy as np
+from scipy.interpolate import make_interp_spline
+import matplotlib.ticker as mticker
+
+# --- Melt dataframe for easy plotting ---
+df_melt = df.melt(id_vars="Month", var_name="Country", value_name="CH4_ppb")
+
+# --- Prepare data for months ---
+month_numeric = np.arange(len(month_order_full))
+month_labels = month_order_full
+
+# --- Aesthetic configuration ---
+plt.figure(figsize=(14, 8))
+sns.set_theme(style="whitegrid", context="paper")
+plt.rcParams.update({
+    "font.family": "serif",
+    "font.serif": ["Times New Roman", "DejaVu Serif"],
+    "axes.labelsize": 14,
+    "axes.titlesize": 18,
+    "legend.fontsize": 12,
+    "xtick.labelsize": 12,
+    "ytick.labelsize": 12
+})
+
+# --- Define color palette (colorblind-safe and soft) ---
+palette = sns.color_palette("Set2", len(df_melt["Country"].unique()))
+
+# --- Plot smooth lines for all countries ---
+for i, cname in enumerate(sorted(df_melt["Country"].unique())):
+    sub = df_melt[df_melt["Country"] == cname].dropna()
+    if len(sub) >= 4:
+        x = np.arange(len(sub))
+        y = sub["CH4_ppb"].values
+        spline = make_interp_spline(x, y, k=3)
+        x_smooth = np.linspace(0, len(x)-1, 300)
+        y_smooth = spline(x_smooth)
+        plt.plot(np.linspace(0, len(month_labels)-1, 300), y_smooth,
+                 label=cname, color=palette[i], linewidth=2.5)
+    else:
+        plt.plot(month_numeric, sub["CH4_ppb"],
+                 label=cname, color=palette[i], linewidth=2.2)
+
+# --- Titles and labels ---
+plt.title("Monthly Methane Emission Change Detection (2024–2025)",
+          fontsize=18, weight='bold', pad=15)
+plt.xlabel("Month", labelpad=10, fontsize=14)
+plt.ylabel("Mean CH₄ Emission (ppb)", labelpad=10, fontsize=14)
+
+plt.xticks(month_numeric, month_labels, rotation=25, ha='right')
+plt.grid(alpha=0.25, linewidth=0.8)
+
+# --- Legend ---
+legend = plt.legend(
+    title="Country",
+    bbox_to_anchor=(1.02, 1),
+    loc='upper left',
+    frameon=True,
+    facecolor='white',
+    edgecolor='gray',
+    fontsize=11,
+    title_fontsize=13
+)
+plt.setp(legend.get_title(), fontweight='bold')
+
+# --- Annotate peaks and lows per country ---
+for cname in df.columns[1:]:
+    y_vals = df[cname].values
+    if not np.isnan(y_vals).all():
+        max_i = np.nanargmax(y_vals)
+        min_i = np.nanargmin(y_vals)
+        plt.text(max_i, y_vals[max_i] + 2, f"▲ {cname}", fontsize=8.5,
+                 ha='center', va='bottom', color='black', alpha=0.7)
+        plt.text(min_i, y_vals[min_i] - 2, f"▼ {cname}", fontsize=8.5,
+                 ha='center', va='top', color='gray', alpha=0.7)
+
+# --- Format Y-axis to remove decimals ---
+plt.gca().yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{x:,.0f}"))
+
+# --- Layout adjustment ---
+plt.tight_layout(rect=[0, 0, 0.85, 1])
+
+# --- Footer / caption ---
+plt.figtext(0.01, 0.01, "Data source: CH₄ emission (ppb), 2024–2025", ha="left", fontsize=10, color="gray")
+
+# --- Show ---
+plt.show()
+
+print("\n✅ Professional CH₄ multi-line change detection graph generated successfully.")
