@@ -1,0 +1,132 @@
+# ===============================================================
+# 🛰️ Methane Emission Change Detection (12-Month, 7 Countries)
+# ===============================================================
+
+# --- 1️⃣ Setup Environment
+!pip install geopandas rasterio matplotlib tqdm seaborn
+
+import os
+import rasterio
+import geopandas as gpd
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from rasterio.mask import mask
+from tqdm import tqdm
+
+# --- 2️⃣ Mount Google Drive
+from google.colab import drive
+drive.mount('/content/drive')
+
+# --- 3️⃣ Define Paths
+tif_dir = "/content/CH4_GapFilled_data/Extracted Gap Filled"   # folder containing 12 .tif files (Jan.tif ... Dec.tif)
+country_shp_dir = "/content/drive/MyDrive/Countries"  # folder with 7 shapefiles
+
+# --- 4️⃣ Month Order (for clean sorting)
+month_order = ["Jan", "Feb", "March", "April", "May", "June", 
+                "July", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+# --- 5️⃣ Load all country shapefiles
+country_shapefiles = sorted([os.path.join(country_shp_dir, f) for f in os.listdir(country_shp_dir) if f.endswith('.shp')])
+print("✅ Found shapefiles:", len(country_shapefiles))
+
+countries = {}
+for shp in country_shapefiles:
+    cname = os.path.splitext(os.path.basename(shp))[0]
+    gdf = gpd.read_file(shp).to_crs("EPSG:4326")
+    countries[cname] = gdf
+
+print("Countries Loaded →", list(countries.keys()))
+
+# --- 6️⃣ List and Sort TIF Files by Month
+tif_files = [os.path.join(tif_dir, f) for f in os.listdir(tif_dir) if f.endswith('.tif')]
+
+# Create a dict of month_name: path
+tif_dict = {}
+for f in tif_files:
+    for m in month_order:
+        if m.lower() in f.lower():
+            tif_dict[m] = f
+
+# Sort by calendar order
+tif_files_sorted = [tif_dict[m] for m in month_order if m in tif_dict]
+print("✅ TIF files in month order:", [os.path.basename(f) for f in tif_files_sorted])
+
+# --- 7️⃣ Function to extract mean CH₄ for a shapefile
+def extract_mean_ch4(raster_path, country_gdf):
+    with rasterio.open(raster_path) as src:
+        gdf_proj = country_gdf.to_crs(src.crs)
+        geom = [gdf_proj.geometry.union_all()]  # modern way (avoids warnings)
+        try:
+            out_img, _ = mask(src, geom, crop=True)
+            arr = out_img.astype("float32")
+            arr[arr == src.nodata] = np.nan
+            mean_val = np.nanmean(arr)
+        except Exception:
+            mean_val = np.nan
+    return mean_val
+
+# --- 8️⃣ Extract monthly means for all countries
+data = []
+for tif_path in tqdm(tif_files_sorted, desc="📊 Processing Monthly CH₄ Files"):
+    month_name = os.path.splitext(os.path.basename(tif_path))[0]
+    row = {"Month": month_name}
+    for cname, cgdf in countries.items():
+        row[cname] = extract_mean_ch4(tif_path, cgdf)
+    data.append(row)
+
+# --- 9️⃣ Create DataFrame
+df = pd.DataFrame(data)
+df["Month"] = pd.Categorical(df["Month"], categories=month_order, ordered=True)
+df = df.sort_values("Month").reset_index(drop=True)
+print("\n✅ DataFrame created successfully:\n")
+print(df.head(12))
+
+# --- 🔟 Save CSV Results
+output_csv = "/content/drive/MyDrive/CH4_Monthly_Mean_ByCountry.csv"
+df.to_csv(output_csv, index=False)
+print(f"\n📁 Saved results to: {output_csv}")
+
+# ===============================================================
+# 📈 Research-Grade Visualization (Seaborn)
+# ===============================================================
+
+# Melt data for seaborn
+df_melt = df.melt(id_vars="Month", var_name="Country", value_name="Mean_CH4")
+
+# --- 11️⃣ Create Plot
+plt.figure(figsize=(12,7))
+sns.set(style="whitegrid", font_scale=1.1)
+palette = sns.color_palette("tab10", n_colors=len(countries))
+
+ax = sns.lineplot(
+    data=df_melt,
+    x="Month",
+    y="Mean_CH4",
+    hue="Country",
+    style="Country",
+    markers=True,
+    dashes=False,
+    palette=palette,
+    linewidth=2.2
+)
+
+plt.title("Monthly Methane Emission Change Detection (2024–2025)", fontsize=16, weight='bold')
+plt.xlabel("Month")
+plt.ylabel("Mean CH₄ Emission (ppb)")
+plt.legend(title="Country", bbox_to_anchor=(1.02, 1), loc="upper left", frameon=False)
+plt.tight_layout()
+
+# --- 12️⃣ Annotate Peaks (Highest & Lowest per Country)
+for cname in countries.keys():
+    country_df = df_melt[df_melt["Country"] == cname]
+    if not country_df["Mean_CH4"].isnull().all():
+        max_row = country_df.loc[country_df["Mean_CH4"].idxmax()]
+        min_row = country_df.loc[country_df["Mean_CH4"].idxmin()]
+        plt.text(max_row["Month"], max_row["Mean_CH4"], f"▲ {cname}", fontsize=8, color="black", ha='center', va='bottom')
+        plt.text(min_row["Month"], min_row["Mean_CH4"], f"▼ {cname}", fontsize=8, color="gray", ha='center', va='top')
+
+plt.show()
+
+print("\n✅ Methane Change Detection Line Graph Generated Successfully.")
