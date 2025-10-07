@@ -1,0 +1,343 @@
+# --- STEP 1: Mount Drive and set paths ---
+from google.colab import drive
+drive.mount('/content/drive')
+
+import os
+import zipfile
+from glob import glob
+
+
+///////////////////////////////////
+
+
+# ✅ Change this to your own ZIP path in Drive
+zip_path = '/content/drive/MyDrive/CH4_Fusion_Downscaling.zip'
+extract_path = '/content/CH4_project_data'
+
+if not os.path.exists(extract_path):
+    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+        zip_ref.extractall(extract_path)
+print("✅ Data extracted to:", extract_path)
+
+
+//////////////////////////////////
+
+# --- STEP 1: Install & import libraries ---
+!pip install rasterio geopandas numpy xgboost scikit-learn tqdm --quiet
+
+import rasterio
+import numpy as np
+import os
+from glob import glob
+from tqdm import tqdm
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import r2_score, mean_squared_error
+import xgboost as xgb
+
+////////////////////////////
+
+# --- STEP 2: Define month names ---
+months = ["Jan", "Feb", "March", "April", "May", "June",
+          "July", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+///////////////////////////
+
+# --- STEP 3: Define CH4 reference folder ---
+ch4_ref_dir = '/content/CH4_project_data/CH4_Monthly_Mean(ppb)'   # your CH₄ rasters (Jan.tif etc.)
+
+# --- STEP 4: Define your 19 predictor folders manually ---
+predictor_folders = [
+    '/content/CH4_project_data/Era5',
+    '/content/CH4_project_data/Maiac_AOD',
+    '/content/CH4_project_data/Ndvi',
+    '/content/CH4_project_data/SMAP_HeightLowAtmModLay',
+    '/content/CH4_project_data/SMAP_InfiltrationFlux',
+    '/content/CH4_project_data/SMAP_LAI',
+    '/content/CH4_project_data/SMAP_LandFractionSaturated',
+    '/content/CH4_project_data/SMAP_PrecipitationFlux',
+    '/content/CH4_project_data/SMAP_ProfileSM',
+    '/content/CH4_project_data/SMAP_RootzoneSM',
+    '/content/CH4_project_data/SMAP_SoilTempL1',
+    '/content/CH4_project_data/SMAP_SpecificHumidity',
+    '/content/CH4_project_data/SMAP_SurfaceSM',
+    '/content/CH4_project_data/SMAP_SurfaceTemp',
+    '/content/CH4_project_data/SMAP_SurfaceWetness',
+    '/content/CH4_project_data/SMAP_WindSpeed',
+    '/content/CH4_project_data/Albedo',
+    '/content/CH4_project_data/VIIRS Active Fire',
+    '/content/CH4_project_data/VIIRS Nightlight'
+]
+# 🟩 You can adjust or rename any of these folder paths as per your dataset
+
+# --- STEP 5: Define static predictors (DEM, GHS, etc.) ---
+static_files = [
+    '/content/CH4_project_data/CH4_Emissions/emission24.tif',
+    '/content/CH4_project_data/Dem/Dem.tif',
+    '/content/CH4_project_data/GHS_Built_S_2030/ghs.tif',
+    '/content/CH4_project_data/GLWD/Rice_paddies.tif'
+]
+static_files = [f for f in static_files if os.path.exists(f)]
+print(f"✅ Found {len(static_files)} static predictors")
+
+////////////////////////////////////////
+
+# --- STEP 6: Define output folder ---
+output_root = '/content/CH4_resampled_by_months'
+os.makedirs(output_root, exist_ok=True)
+
+////////////////////////////
+
+def resample_to_ref(src_path, ref_path, dst_path):
+    """Resample any raster to match CH4 reference."""
+    from rasterio.warp import Resampling
+    import rasterio
+    import numpy as np
+    import os
+
+    with rasterio.open(ref_path) as ref:
+        dst_transform = ref.transform
+        dst_crs = ref.crs
+        dst_width = ref.width
+        dst_height = ref.height
+        ref_meta = ref.meta.copy()
+
+    with rasterio.open(src_path) as src:
+        # Automatically decide resampling type
+        if src.dtypes[0].startswith("int") or "landcover" in src_path.lower():
+            resample_method = Resampling.nearest
+        else:
+            resample_method = Resampling.bilinear
+
+        data = src.read(
+            out_shape=(1, dst_height, dst_width),
+            resampling=resample_method
+        )[0]
+
+        ref_meta.update({
+            "driver": "GTiff",
+            "height": dst_height,
+            "width": dst_width,
+            "transform": dst_transform,
+            "crs": dst_crs,
+            "dtype": rasterio.float32,
+            "compress": "lzw"
+        })
+
+        os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+        with rasterio.open(dst_path, "w", **ref_meta) as dst:
+            dst.write(data.astype(np.float32), 1)
+
+//////////////////////////////////////
+
+# --- STEP 8: Process month by month ---
+for month in months:
+    print(f"\n==================== {month} ====================")
+    ch4_ref = os.path.join(ch4_ref_dir, f"{month}.tif")
+
+    if not os.path.exists(ch4_ref):
+        print(f"⚠️ CH4 reference missing for {month}, skipping...")
+        continue
+
+    # Collect all predictors for this month from the 19 folders
+    month_predictors = []
+    for folder in predictor_folders:
+        candidate = os.path.join(folder, f"{month}.tif")
+        if os.path.exists(candidate):
+            month_predictors.append(candidate)
+
+    print(f"✅ Found {len(month_predictors)} monthly predictors for {month}")
+
+    # Create monthly output folder
+    month_out_dir = os.path.join(output_root, month)
+    os.makedirs(month_out_dir, exist_ok=True)
+
+    # --- Resample predictors (make names unique)
+    for f in tqdm(month_predictors, desc=f"Resampling {month} predictors"):
+        folder_name = os.path.basename(os.path.dirname(f))
+        out_name = f"{folder_name}_{month}.tif"
+        out_path = os.path.join(month_out_dir, out_name)
+        resample_to_ref(f, ch4_ref, out_path)
+
+    # --- Add static layers
+    for static_f in static_files:
+        out_name = os.path.basename(static_f)
+        out_path = os.path.join(month_out_dir, out_name)
+        resample_to_ref(static_f, ch4_ref, out_path)
+
+    print(f"📁 {month} folder ready with {len(month_predictors)} predictors + {len(static_files)} statics")
+
+print("\n🎯 All months processed successfully!")
+print("✅ Output root folder:", output_root)
+
+//////////////////////////////////
+
+# --- STEP 9: Define paths for gap-filling ---
+resampled_root = '/content/CH4_resampled_by_months'  # from previous step
+ch4_dir = '/content/CH4_project_data/CH4_Monthly_Mean(ppb)'   # CH4 reference rasters
+output_dir = '/content/CH4_gapfilled_output'
+os.makedirs(output_dir, exist_ok=True)
+
+
+////////////////////////////////
+
+for month in months:
+    print(f"\n==================== {month} ====================")
+    
+    month_folder = os.path.join(resampled_root, month)
+    if not os.path.exists(month_folder):
+        print(f"⚠️ No folder for {month}, skipping...")
+        continue
+
+    # --- (A) Collect all predictors for this month ---
+    predictor_files = sorted(glob(os.path.join(month_folder, '*.tif')))
+    if len(predictor_files) == 0:
+        print(f"⚠️ No predictors found for {month}, skipping...")
+        continue
+
+    print(f"✅ Found {len(predictor_files)} predictors for {month}")
+
+    # Read one file for shape & metadata
+    with rasterio.open(predictor_files[0]) as ref:
+        height, width = ref.height, ref.width
+        meta = ref.meta.copy()
+
+    # --- Stack predictors ---
+    predictor_stack = np.zeros((len(predictor_files), height, width), dtype=np.float32)
+    for i, p in enumerate(predictor_files):
+        with rasterio.open(p) as src:
+            predictor_stack[i, :, :] = src.read(1)
+
+    # Flatten
+    n_features = predictor_stack.shape[0]
+    predictors_2d = predictor_stack.reshape(n_features, -1).T
+    print("📊 Predictor matrix:", predictors_2d.shape)
+
+    # --- (B) Load CH4 raster ---
+    ch4_path = os.path.join(ch4_dir, f'{month}.tif')
+    if not os.path.exists(ch4_path):
+        print(f"⚠️ CH4 raster missing for {month}, skipping...")
+        continue
+
+    with rasterio.open(ch4_path) as src:
+        ch4_data = src.read(1).astype(np.float32)
+        ch4_meta = src.meta.copy()
+
+    mask = np.isnan(ch4_data) | (ch4_data <= 0)
+    y = ch4_data.flatten()
+
+    X_known = predictors_2d[~mask.flatten()]
+    y_known = y[~mask.flatten()]
+    X_missing = predictors_2d[mask.flatten()]
+
+    print(f"🧩 {month}: {len(y_known)} valid pixels, {len(X_missing)} missing pixels")
+
+    if len(y_known) < 1000:
+        print("⚠️ Too few valid pixels — skipping this month.")
+        continue
+
+    # --- (C) Train model ---
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_known, y_known, test_size=0.2, random_state=42
+    )
+
+    dtrain = xgb.DMatrix(X_train, label=y_train)
+    dval = xgb.DMatrix(X_val, label=y_val)
+
+    params = {
+        "objective": "reg:squarederror",
+        "eta": 0.05,
+        "max_depth": 6,
+        "subsample": 0.8,
+        "colsample_bytree": 0.8,
+        "eval_metric": "rmse",
+        "tree_method": "hist",
+        "seed": 42
+    }
+
+    evals = [(dtrain, "train"), (dval, "val")]
+    model = xgb.train(
+        params=params,
+        dtrain=dtrain,
+        num_boost_round=400,
+        evals=evals,
+        early_stopping_rounds=30,
+        verbose_eval=False
+    )
+
+    y_pred_val = model.predict(dval)
+    r2 = r2_score(y_val, y_pred_val)
+    rmse = np.sqrt(mean_squared_error(y_val, y_pred_val))
+    print(f"✅ {month}: Model trained (R²={r2:.3f}, RMSE={rmse:.3f})")
+
+    # --- (D) Predict missing values ---
+    dmissing = xgb.DMatrix(X_missing)
+    y_pred_missing = model.predict(dmissing)
+
+    y_filled = y.copy()
+    y_filled[mask.flatten()] = y_pred_missing
+
+    ch4_filled = y_filled.reshape(height, width)
+
+    # --- (E) Save filled CH4 ---
+    out_path = os.path.join(output_dir, f'{month}_CH4_gapfilled.tif')
+    ch4_meta.update({
+        "dtype": "float32",
+        "compress": "lzw"
+    })
+    with rasterio.open(out_path, 'w', **ch4_meta) as dst:
+        dst.write(ch4_filled.astype(np.float32), 1)
+
+    print(f"💾 Saved filled CH₄ raster for {month}: {out_path}")
+
+print("\n🎯 Gap-filling completed for all available months!")
+
+
+/////////////////////////////////////
+//////////Graph//////////////////
+
+import matplotlib.pyplot as plt
+import numpy as np
+import seaborn as sns
+
+# Data
+months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+r2 = [0.805, 0.834, 0.852, 0.763, 0.784, 0.785, 0.859, 0.849, 0.820, 0.789, 0.839, 0.787]
+rmse = [7.993, 6.205, 6.309, 7.291, 6.995, 7.175, 10.223, 9.275, 10.690, 10.742, 7.179, 6.695]
+
+sns.set_style("whitegrid")
+fig, ax = plt.subplots(figsize=(14,6))
+
+x = np.arange(len(months))
+width = 0.35
+
+# RMSE bars
+bars = ax.bar(x - width/2, rmse, width, label='RMSE', color="#1f77b4", alpha=0.7)
+
+# R² markers
+ax2 = ax.twinx()
+ax2.plot(x + width/2, r2, color="#ff7f0e", marker='o', linewidth=2, markersize=8, label='R²')
+
+# Labels & title
+ax.set_xticks(x)
+ax.set_xticklabels(months, fontsize=12)
+ax.set_ylabel("RMSE (CH₄ units)", fontsize=12, color="#1f77b4")
+ax2.set_ylabel("R²", fontsize=12, color="#ff7f0e")
+ax.set_ylim(0, max(rmse)*1.2)
+ax2.set_ylim(0, 1.0)
+plt.title("Monthly CH₄ Gap-Filling Model Performance", fontsize=16, weight='bold')
+
+# Legends
+ax.legend(loc='upper left', fontsize=12)
+ax2.legend(loc='upper right', fontsize=12)
+
+# Add value labels on bars (optional, professional look)
+for bar in bars:
+    height = bar.get_height()
+    ax.annotate(f'{height:.1f}',
+                xy=(bar.get_x() + bar.get_width()/2, height),
+                xytext=(0,3), textcoords="offset points",
+                ha='center', va='bottom', fontsize=10)
+
+plt.tight_layout()
+plt.show()
+
