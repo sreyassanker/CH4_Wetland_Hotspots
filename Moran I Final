@@ -1,0 +1,116 @@
+# ==============================================================
+# 🛰️ LOCAL MORAN’S I ANALYSIS FOR WETLAND HOTSPOTS
+# ==============================================================
+# Author: Sreyas S S
+# Purpose: Derive spatial clustering (hotspot/coldspot) from NDVI-based wetland index
+# Software: Google Colab / Python 3.10+
+# Libraries: rasterio, numpy, pysal, matplotlib
+# Reference: Anselin (1995), Fan and Myint (2014)
+# ==============================================================
+
+# ✅ 1️⃣ INSTALL REQUIRED PACKAGES
+# --------------------------------------------------------------
+!pip install rasterio numpy pysal matplotlib
+
+# ✅ 2️⃣ IMPORT LIBRARIES
+# --------------------------------------------------------------
+import os
+import rasterio
+import numpy as np
+import matplotlib.pyplot as plt
+from esda.moran import Moran_Local
+from libpysal.weights import lat2W
+
+# ✅ 3️⃣ DEFINE INPUT FOLDER
+# --------------------------------------------------------------
+folder_path = "/content/drive/MyDrive/Extracted Wetland Hotspots"  # <-- Change to your folder path
+
+# Select specific months (modify if needed)
+months = ["Jan", "Feb", "March", "April", "May", "June","July" , "Aug","Sep","Oct","Nov","Dec"]  
+tif_files = [
+    os.path.join(folder_path, f"{m}.tif")
+    for m in months
+    if os.path.exists(os.path.join(folder_path, f"{m}.tif"))
+]
+
+print(f"✅ Found {len(tif_files)} monthly raster files:")
+for f in tif_files:
+    print("   •", os.path.basename(f))
+
+# ✅ 4️⃣ READ AND COMBINE MONTHLY NDVI RASTERS
+# --------------------------------------------------------------
+data_list = []
+profile = None
+
+for f in tif_files:
+    with rasterio.open(f) as src:
+        arr = src.read(1).astype(float)
+        arr[arr == src.nodata] = np.nan  # handle nodata
+        data_list.append(arr)
+        profile = src.profile
+
+# Compute annual (multi-month) mean
+annual_data = np.nanmean(np.stack(data_list), axis=0)
+
+# ✅ 5️⃣ NORMALIZE DATA BETWEEN –1 AND +1 (Fan & Myint, 2014)
+# --------------------------------------------------------------
+min_val, max_val = np.nanmin(annual_data), np.nanmax(annual_data)
+annual_norm = 2 * ((annual_data - min_val) / (max_val - min_val)) - 1
+
+# ✅ 6️⃣ COMPUTE LOCAL MORAN’S I (Anselin, 1995)
+# --------------------------------------------------------------
+rows, cols = annual_norm.shape
+values = np.nan_to_num(annual_norm).flatten()
+
+# Create spatial weight matrix
+w = lat2W(rows, cols)
+w.transform = 'r'
+
+# Calculate Local Moran’s I
+moran_local = Moran_Local(values, w)
+local_i = moran_local.Is.reshape(rows, cols)
+z_values = moran_local.z_sim.reshape(rows, cols)
+
+# ✅ 7️⃣ EXPORT RESULTS AS GEOTIFFS
+# --------------------------------------------------------------
+profile.update(dtype=rasterio.float32, count=1, nodata=np.nan)
+
+i_path = os.path.join(folder_path, "Year_Local_Moran_I.tif")
+z_path = os.path.join(folder_path, "Year_Local_Moran_Zscore.tif")
+
+with rasterio.open(i_path, "w", **profile) as dst:
+    dst.write(local_i.astype(np.float32), 1)
+
+with rasterio.open(z_path, "w", **profile) as dst:
+    dst.write(z_values.astype(np.float32), 1)
+
+print("✅ Exported:")
+print("   •", i_path)
+print("   •", z_path)
+
+# ✅ 8️⃣ GENERATE SIGNIFICANT HOTSPOT MAP (95% confidence)
+# --------------------------------------------------------------
+hotspots = np.where(z_values > 1.96, 1, 0)       # High-High clusters
+coldspots = np.where(z_values < -1.96, -1, 0)    # Low-Low clusters
+sig_map = hotspots + coldspots
+
+sig_path = os.path.join(folder_path, "Significant_Hotspot_Map.tif")
+
+with rasterio.open(sig_path, "w", **profile) as dst:
+    dst.write(sig_map.astype(np.float32), 1)
+
+# ✅ 9️⃣ VISUALIZE RESULTS
+# --------------------------------------------------------------
+plt.figure(figsize=(10, 5))
+plt.imshow(local_i, cmap="RdBu", vmin=np.nanmin(local_i), vmax=np.nanmax(local_i))
+plt.title("Annual Wetland Hotspot Intensity (Local Moran’s I)")
+plt.colorbar(label="Local Moran’s I Value")
+plt.show()
+
+plt.figure(figsize=(10, 5))
+plt.imshow(sig_map, cmap="bwr")
+plt.title("Significant Hotspots (Z > 1.96 or Z < -1.96)")
+plt.colorbar(label="Hotspot (1) / Coldspot (-1)")
+plt.show()
+
+print("✅ Analysis completed successfully.")
