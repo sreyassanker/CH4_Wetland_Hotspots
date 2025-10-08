@@ -1,0 +1,82 @@
+# ==============================================================
+# 1️⃣ Install required packages
+# ==============================================================
+!pip install rasterio numpy pysal matplotlib
+
+# ==============================================================
+# 2️⃣ Imports
+# ==============================================================
+import os
+import rasterio
+import numpy as np
+import matplotlib.pyplot as plt
+from esda.moran import Moran_Local
+from libpysal.weights import lat2W
+
+# ==============================================================
+# 3️⃣ Set your folder path
+# ==============================================================
+folder_path = "/content/drive/MyDrive/Extracted Wetland Hotspots"  # <-- change this to your folder path
+tif_files = sorted([os.path.join(folder_path, f) for f in os.listdir(folder_path) if f.endswith(".tif")])
+
+print(f"Found {len(tif_files)} TIF files in folder.")
+
+# ==============================================================
+# 4️⃣ Read all monthly rasters and calculate the annual mean
+# ==============================================================
+data_list = []
+profile = None
+
+for f in tif_files:
+    with rasterio.open(f) as src:
+        arr = src.read(1).astype(float)
+        arr[arr == src.nodata] = np.nan
+        data_list.append(arr)
+        profile = src.profile
+
+annual_data = np.nanmean(np.stack(data_list), axis=0)
+
+# ==============================================================
+# 5️⃣ Normalize annual data between -1 and 1 (Fan & Myint, 2014)
+# ==============================================================
+min_val = np.nanmin(annual_data)
+max_val = np.nanmax(annual_data)
+annual_norm = 2 * ((annual_data - min_val) / (max_val - min_val)) - 1
+
+# ==============================================================
+# 6️⃣ Compute Local Moran’s I
+# ==============================================================
+rows, cols = annual_norm.shape
+values = np.nan_to_num(annual_norm).flatten()
+
+w = lat2W(rows, cols)
+w.transform = 'r'
+
+moran_local = Moran_Local(values, w)
+local_i = moran_local.Is.reshape(rows, cols)
+z_values = moran_local.z_sim.reshape(rows, cols)
+
+# ==============================================================
+# 7️⃣ Save outputs
+# ==============================================================
+profile.update(dtype=rasterio.float32, count=1, nodata=np.nan)
+
+annual_i_path = os.path.join(folder_path, "annual_local_moran.tif")
+annual_z_path = os.path.join(folder_path, "annual_local_moran_z.tif")
+
+with rasterio.open(annual_i_path, "w", **profile) as dst:
+    dst.write(local_i.astype(np.float32), 1)
+
+with rasterio.open(annual_z_path, "w", **profile) as dst:
+    dst.write(z_values.astype(np.float32), 1)
+
+print("✅ Final annual Moran’s I and Z-score maps saved in your folder!")
+
+# ==============================================================
+# 8️⃣ Visualize the results
+# ==============================================================
+plt.figure(figsize=(10, 5))
+plt.title("Annual Wetland Hotspot (Local Moran’s I)")
+plt.imshow(local_i, cmap='RdBu', vmin=-1, vmax=1)
+plt.colorbar(label="Local Moran’s I Value")
+plt.show()
