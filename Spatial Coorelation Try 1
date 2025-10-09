@@ -1,0 +1,140 @@
+# ============================================
+# 📘 SPATIAL CORRELATION ANALYSIS
+# Wetland Hotspots (points) vs Reclassified Raster
+# ============================================
+
+# --- Install Required Libraries ---
+!pip install geopandas rasterio rasterstats matplotlib seaborn numpy pandas scipy --quiet
+
+# --- Import Libraries ---
+import geopandas as gpd
+import rasterio
+from rasterstats import point_query
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+import numpy as np
+from scipy.stats import pearsonr, spearmanr, zscore
+
+# --- USER INPUT SECTION ---
+hotspot_points_path = "/content/drive/MyDrive/Validation/SA_Ramsar_sites.shp"    # point shapefile (hotspots)
+raster_path = "/content/drive/MyDrive/Validation/Annual_H_Wetland.tif"           # raster file
+study_area_path = "/content/drive/MyDrive/SA_Shapefile/Study_Area.shp"           # study area boundary
+
+# --- Load Data ---
+points = gpd.read_file(hotspot_points_path)
+raster = rasterio.open(raster_path)
+study_area = gpd.read_file(study_area_path)
+
+print("✅ Files loaded successfully")
+print(f"Hotspot Points: {len(points)} features")
+print(f"Study Area CRS: {study_area.crs}")
+print(f"Raster CRS: {raster.crs}")
+print(f"Points CRS: {points.crs}")
+
+# --- CRS Alignment ---
+if points.crs != raster.crs:
+    print("⚠️ CRS mismatch — reprojecting points to raster CRS...")
+    points = points.to_crs(raster.crs)
+else:
+    print("✅ CRS consistent across datasets")
+
+if study_area.crs != raster.crs:
+    print("⚠️ CRS mismatch — reprojecting study area...")
+    study_area = study_area.to_crs(raster.crs)
+else:
+    print("✅ Study area CRS consistent")
+
+# --- Diagnostic Plot ---
+fig, ax = plt.subplots(figsize=(7,7))
+rasterio.plot.show(raster, ax=ax, cmap='Greys_r')
+study_area.boundary.plot(ax=ax, color='green', linewidth=2, label='Study Area')
+points.plot(ax=ax, color='red', markersize=20, label='Hotspot Points')
+plt.legend()
+plt.title("Wetland Hotspots vs Raster Extent", fontsize=13)
+plt.show()
+
+# --- Extract Raster Values at Point Locations ---
+points['raster_value'] = point_query(points, raster_path)
+valid_points = points.dropna(subset=['raster_value'])
+print(f"\n✅ Raster values extracted for {len(valid_points)} out of {len(points)} points")
+
+# --- Prepare Data ---
+if 'Hotspot_Intensity' in valid_points.columns:
+    x = valid_points['Hotspot_Intensity']
+else:
+    x = np.arange(len(valid_points))  # fallback if no intensity field
+
+y = valid_points['raster_value']
+
+# --- Compute Correlations ---
+pearson_corr, pearson_p = pearsonr(x, y)
+spearman_corr, spearman_p = spearmanr(x, y)
+
+# --- Compute Z-Scores ---
+x_z = zscore(x)
+y_z = zscore(y)
+
+# --- Print Statistical Results ---
+print("\n📊 SPATIAL CORRELATION RESULTS (with Significance)")
+print(f"• Pearson correlation (r): {pearson_corr:.3f}")
+print(f"• Pearson p-value: {pearson_p:.5f}")
+print(f"• Spearman correlation (ρ): {spearman_corr:.3f}")
+print(f"• Spearman p-value: {spearman_p:.5f}")
+
+# --- Save CSV Output ---
+output_csv = "/content/spatial_correlation_results.csv"
+valid_points[['geometry', 'raster_value']].to_csv(output_csv, index=False)
+print(f"\n📁 Results saved to: {output_csv}")
+
+# ============================================================
+# 📈 VISUALIZATION SECTION
+# ============================================================
+
+sns.set_theme(style="whitegrid", font_scale=1.2)
+
+# --- 1️⃣ Correlation Scatter Plot with Regression Line ---
+plt.figure(figsize=(8,6))
+sns.regplot(x=x, y=y, scatter_kws={'s':60, 'alpha':0.8, 'color':'#0072B2'}, line_kws={'color':'#D55E00', 'lw':2})
+plt.title("Spatial Correlation: Wetland Hotspots vs Raster Values", fontsize=14, weight='bold')
+plt.xlabel("Hotspot Intensity / Index", fontsize=12)
+plt.ylabel("Raster Value", fontsize=12)
+
+# Annotate correlation stats
+plt.text(0.05, 0.95,
+         f"Pearson r = {pearson_corr:.3f}\n(p = {pearson_p:.4f})\nSpearman ρ = {spearman_corr:.3f}\n(p = {spearman_p:.4f})",
+         transform=plt.gca().transAxes,
+         verticalalignment='top',
+         bbox=dict(boxstyle="round,pad=0.4", fc="white", ec="#333", alpha=0.8),
+         fontsize=11)
+plt.tight_layout()
+plt.show()
+
+# --- 2️⃣ Z-Score Scatter Plot (Standardized Relationship) ---
+plt.figure(figsize=(8,6))
+plt.scatter(x_z, y_z, c=y_z, cmap='viridis', s=70, edgecolor='k', alpha=0.85)
+sns.regplot(x=x_z, y=y_z, scatter=False, color='darkred', line_kws={'lw':2})
+plt.title("Standardized (Z-score) Correlation Plot", fontsize=14, weight='bold')
+plt.xlabel("Hotspot Z-score")
+plt.ylabel("Raster Z-score")
+plt.grid(True, linestyle='--', alpha=0.5)
+plt.colorbar(label='Raster Z-score')
+plt.tight_layout()
+plt.show()
+
+# --- 3️⃣ Distribution Histograms ---
+plt.figure(figsize=(10,4))
+plt.subplot(1,2,1)
+sns.histplot(x, kde=True, color="#0072B2")
+plt.title("Distribution of Hotspot Intensity", fontsize=12)
+plt.subplot(1,2,2)
+sns.histplot(y, kde=True, color="#D55E00")
+plt.title("Distribution of Raster Values", fontsize=12)
+plt.tight_layout()
+plt.show()
+
+# --- 4️⃣ Map Visualization ---
+valid_points.plot(column='raster_value', cmap='plasma', legend=True, figsize=(7,7))
+plt.title("Hotspot Points Colored by Extracted Raster Value", fontsize=13)
+plt.tight_layout()
+plt.show()
